@@ -1,0 +1,47 @@
+# Python and local test environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.egg-info/
+build/
+dist/
+
+# Editor and OS artifacts
+.DS_Store
+._*
+.idea/
+.vscode/
+*~
+
+# Never publish Home Assistant/site state, credentials, or captures
+.env
+.env.*
+!.env.example
+secrets.yaml
+configuration.yaml
+.storage/
+.cloud/
+backups/
+private/
+site/
+site_data/
+captures/
+*.log
+*.pcap
+*.pcapng
+*.pem
+*.key
+*.p12
+*.pfx
+*.tar
+*.tar.gz
+*.zip
+home-assistant_v2.db*

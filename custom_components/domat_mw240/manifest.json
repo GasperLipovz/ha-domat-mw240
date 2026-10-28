@@ -1,0 +1,12 @@
+{
+  "domain": "domat_mw240",
+  "name": "Domat MW240-B Blinds",
+  "codeowners": ["@GasperLipovz"],
+  "config_flow": true,
+  "documentation": "https://github.com/GasperLipovz/ha-domat-mw240",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/GasperLipovz/ha-domat-mw240/issues",
+  "requirements": ["pymodbus==3.13.1", "pyserial==3.5"],
+  "version": "0.3.0"
+}

@@ -1,0 +1,4 @@
+# Offline CI baseline; use Python 3.14.
+homeassistant==2026.9.4
+pymodbus==3.13.1
+pyserial==3.5
