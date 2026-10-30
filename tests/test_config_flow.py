@@ -25,7 +25,7 @@ class SchemaTests(unittest.TestCase):
     def test_shared_bus_schema_preserves_defaults_with_all_write_permissions_off(self):
         schema = self.schema()
         checked = schema.BUS_SCHEMA(bus())
-        self.assertEqual(checked, bus(baudrate=19200, parity="N", stopbits=1,
+        self.assertEqual(checked, bus(connection_type="serial", baudrate=19200, parity="N", stopbits=1,
                                      poll_interval=2, timeout=0.4, command_ttl=5,
                                      allow_commands=False, allow_timing_changes=False,
                                      allow_eeprom_save=False))
@@ -93,10 +93,31 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.hass.config_entries._entries[entry.entry_id] = entry
         return entry
 
+    async def submit_user(self, flow, settings):
+        """Drive the public transport-choice and endpoint steps."""
+        settings = dict(settings)
+        choice = {"name": settings.pop("name"), "connection_type": settings.pop("connection_type", "serial")}
+        result = await flow.async_step_user(choice)
+        if result["type"] != "form" or result["step_id"] == "user":
+            return result
+        return await getattr(flow, f"async_step_{choice['connection_type']}")(settings)
+
+    async def submit_options(self, flow, settings):
+        """Drive options choice, preserving the existing mode unless switched."""
+        settings = dict(settings)
+        current = {**flow.config_entry.data, **flow.config_entry.options}
+        mode = settings.pop("connection_type", current.get("connection_type", "serial"))
+        if "name" in settings:
+            return await flow.async_step_init({"name": settings["name"], "connection_type": mode})
+        result = await flow.async_step_init({"connection_type": mode})
+        if result["type"] != "form" or result["step_id"] == "init":
+            return result
+        return await getattr(flow, f"async_step_{mode}")(settings)
+
     async def test_existing_bus_name_aborts_without_overwriting_permissions(self):
         entry = self.entry(options={"allow_commands": True, "port": "/dev/new"})
         original = dict(entry.options)
-        result = await self.flow().async_step_user({"name": "office", "port": "/dev/unused", "allow_commands": False})
+        result = await self.submit_user(self.flow(), {"name": "office", "port": "/dev/unused", "allow_commands": False})
         self.assertEqual(result["type"], "abort")
         self.assertEqual(result["reason"], "already_configured")
         self.assertEqual(dict(entry.options), original)
@@ -117,17 +138,17 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             threads.append(threading.get_ident())
             return original(value)
         with patch("os.path.realpath", side_effect=realpath):
-            result = await self.flow().async_step_user({"name": "second", "port": str(alias)})
+            result = await self.submit_user(self.flow(), {"name": "second", "port": str(alias)})
         self.assertEqual(result["type"], "form")
         self.assertEqual(result["errors"], {"port": "serial_port_in_use"})
         self.assertTrue(threads)
         self.assertNotIn(loop_thread, threads)
-        valid = await self.flow().async_step_user({"name": "second", "port": "/dev/old"})
+        valid = await self.submit_user(self.flow(), {"name": "second", "port": "/dev/old"})
         self.assertEqual(valid["step_id"], "modules", "Old data port is released when options override it")
 
     async def test_port_claimed_between_user_and_modules_is_rechecked(self):
         flow = self.flow()
-        await flow.async_step_user({"name": "office", "port": "/dev/example"})
+        await self.submit_user(flow, {"name": "office", "port": "/dev/example"})
         self.entry(data=bus(name="other"), unique_id="other")
         result = await flow.async_step_modules({"modules": "23: Window"})
         self.assertEqual(result["type"], "abort")
@@ -187,11 +208,13 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         with patch("serial.Serial", side_effect=AssertionError("Options must never access serial")):
             initial = await flow.async_step_init()
             self.assertEqual(initial["step_id"], "init")
-            defaults = initial["data_schema"]({})
+            selected = await flow.async_step_init({"connection_type": "serial"})
+            self.assertEqual(selected["step_id"], "serial")
+            defaults = selected["data_schema"]({})
             self.assertNotIn("name", defaults)
             self.assertTrue(defaults["allow_commands"])
             self.assertEqual(defaults["timeout"], 0.8)
-            modules = await flow.async_step_init({"port": "/dev/updated", "baudrate": 9600, "parity": "E", "stopbits": 2, "poll_interval": 4, "command_ttl": 6, "allow_commands": False, "allow_timing_changes": True, "allow_eeprom_save": True})
+            modules = await self.submit_options(flow, {"port": "/dev/updated", "baudrate": 9600, "parity": "E", "stopbits": 2, "poll_interval": 4, "command_ttl": 6, "allow_commands": False, "allow_timing_changes": True, "allow_eeprom_save": True})
             self.assertEqual(modules["step_id"], "modules")
             self.assertEqual(next(iter(modules["data_schema"].schema)).default(), "23: Window")
             result = await flow.async_step_modules({"modules": "24: Renamed\n25: New blind"})
@@ -207,16 +230,16 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         entry = self.entry()
         for changes, errors in (({"name": "renamed"}, {"base": "invalid_config"}), ({"timeout": 99}, {"timeout": "invalid_config"})):
             with self.subTest(changes=changes):
-                result = await self.options_flow(entry).async_step_init(changes)
+                result = await self.submit_options(self.options_flow(entry), changes)
                 self.assertEqual(result["type"], "form")
-                self.assertEqual(result["step_id"], "init")
+                self.assertEqual(result["step_id"], "init" if "name" in changes else "serial")
                 self.assertEqual(result["errors"], errors)
         self.assertEqual(entry.data["name"], "office")
 
     async def test_options_modules_errors_are_correctable_and_keep_existing_options(self):
         entry = self.entry(options={"allow_commands": True})
         flow = self.options_flow(entry)
-        await flow.async_step_init({"baudrate": 9600})
+        await self.submit_options(flow, {"baudrate": 9600})
         result = await flow.async_step_modules({"modules": "23: Duplicate\n23: Also duplicate"})
         self.assertEqual(result["type"], "form")
         self.assertEqual(result["errors"], {"modules": "invalid_modules"})
@@ -229,15 +252,15 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         entry = self.entry()
         self.entry(data=bus(name="other", port="/dev/other"), unique_id="other")
         flow = self.options_flow(entry)
-        result = await flow.async_step_init({"port": "/dev/../dev/other"})
+        result = await self.submit_options(flow, {"port": "/dev/../dev/other"})
         self.assertEqual(result["type"], "form")
         self.assertEqual(result["errors"], {"port": "serial_port_in_use"})
-        await flow.async_step_init({"port": "/dev/example"})
+        await self.submit_options(flow, {"port": "/dev/example"})
         result = await flow.async_step_modules({"modules": "23: Window"})
         self.assertEqual(result["type"], "create_entry")
         # A conflicting entry appearing after the first step must still prevent saving.
         flow = self.options_flow(entry)
-        await flow.async_step_init({"port": "/dev/new"})
+        await self.submit_options(flow, {"port": "/dev/new"})
         self.entry(data=bus(name="third", port="/dev/new"), unique_id="third")
         result = await flow.async_step_modules({"modules": "23: Window"})
         self.assertEqual(result["type"], "abort")
@@ -246,7 +269,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_forms_serialize_for_real_home_assistant_frontend(self):
         from probatio import to_field_list
         from homeassistant.helpers import config_validation as cv
-        forms = [await self.flow().async_step_user(), await self.options_flow(self.entry()).async_step_init()]
+        forms = [await self.flow().async_step_user({"name": "office", "connection_type": "serial"}), await self.options_flow(self.entry()).async_step_init({"connection_type": "serial"})]
         for form in forms:
             fields = to_field_list(form["data_schema"], custom_serializer=cv.custom_serializer)
             by_name = {field["name"]: field for field in fields}
@@ -263,8 +286,8 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(initial["type"], FlowResultType.FORM)
             self.assertEqual(initial["step_id"], "user")
             fields = {key.schema for key in initial["data_schema"].schema}
-            self.assertEqual(fields, {"name", "port", "baudrate", "parity", "stopbits", "poll_interval", "timeout", "command_ttl", "allow_commands", "allow_timing_changes", "allow_eeprom_save"})
-            modules = await flow.async_step_user({"name": "office", "port": "/dev/example"})
+            self.assertEqual(fields, {"name", "connection_type"})
+            modules = await self.submit_user(flow, {"name": "office", "port": "/dev/example"})
             self.assertEqual(modules["step_id"], "modules")
             selector = modules["data_schema"].schema["modules"]
             self.assertTrue(selector.config["multiline"])
@@ -280,14 +303,14 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         for text in ("", "23", "0: Broadcast", "248: Invalid", "-1: Invalid", "23.0: Invalid", "True: Invalid", "+23: Invalid", "01: Invalid", "23:", "23: One\n23: Two", "23: One\nbroken"):
             with self.subTest(text=text):
                 flow = self.flow()
-                await flow.async_step_user({"name": "office", "port": "/dev/example"})
+                await self.submit_user(flow, {"name": "office", "port": "/dev/example"})
                 result = await flow.async_step_modules({"modules": text})
                 self.assertEqual(result["type"], FlowResultType.FORM)
                 self.assertEqual(result["errors"], {"modules": "invalid_modules"})
                 self.assertEqual(result["data_schema"].schema[next(iter(result["data_schema"].schema))].config["multiline"], True)
                 self.assertEqual(next(iter(result["data_schema"].schema)).default(), text)
         flow = self.flow()
-        await flow.async_step_user({"name": "office", "port": "/dev/example"})
+        await self.submit_user(flow, {"name": "office", "port": "/dev/example"})
         valid = await flow.async_step_modules({"modules": "\n".join(f"{unit}: Module {unit}" for unit in range(1, 248))})
         self.assertEqual(len(valid["data"]["devices"]), 247)
 
@@ -295,7 +318,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.data_entry_flow import FlowResultType
         for changes, field in (({"name": "Office Bus"}, "name"), ({"name": ""}, "name"), ({"port": " "}, "port"), ({"baudrate": 12345}, "baudrate"), ({"parity": "X"}, "parity"), ({"poll_interval": 0}, "poll_interval"), ({"timeout": 3}, "timeout"), ({"command_ttl": 16}, "command_ttl")):
             with self.subTest(changes=changes):
-                result = await self.flow().async_step_user({"name": "office", "port": "/dev/example", **changes})
+                result = await self.submit_user(self.flow(), {"name": "office", "port": "/dev/example", **changes})
                 self.assertEqual(result["type"], FlowResultType.FORM)
                 self.assertEqual(result["errors"], {field: "invalid_config"})
 
@@ -310,18 +333,23 @@ class TranslationTests(unittest.TestCase):
             documents.append(json.loads(path.read_text()))
         self.assertEqual(documents[0], documents[1])
         schema = importlib.import_module("custom_components.domat_mw240.config_schema")
-        fields = {key.schema for key in schema.SETTINGS_SCHEMA.schema}
-        for section, step, wanted in (("config", "user", fields), ("options", "init", fields - {"name"})):
+        all_fields = {key.schema for key in schema.SETTINGS_SCHEMA.schema}
+        for section, step, wanted in (("config", "user", {"name", "connection_type"}), ("options", "init", {"connection_type"})):
             flow = documents[0][section]
             self.assertEqual(set(flow["step"][step]["data"]), wanted)
             self.assertEqual(set(flow["step"]["modules"]["data"]), {"modules"})
-            self.assertTrue({"invalid_config", "invalid_modules", "serial_port_in_use", "already_configured"} <= set(flow["error"]))
-            self.assertTrue({"already_configured", "serial_port_in_use", "invalid_config", "already_in_progress"} <= set(flow["abort"]))
-            details = flow["step"][step]
-            self.assertIn("do not reprogram", details["description"])
-            warning = details["data_description"]["allow_eeprom_save"]
-            self.assertIn("all RAM configuration", warning)
-            self.assertIn("tested firmware 17", warning)
+            self.assertTrue({"invalid_config", "invalid_modules", "serial_port_in_use", "tcp_endpoint_in_use", "already_configured"} <= set(flow["error"]))
+            self.assertTrue({"already_configured", "serial_port_in_use", "tcp_endpoint_in_use", "invalid_config", "already_in_progress"} <= set(flow["abort"]))
+            for mode, inactive in (("serial", {"host", "tcp_port"}), ("tcp", {"port", "baudrate", "parity", "stopbits"})):
+                details = flow["step"][mode]
+                self.assertEqual(set(details["data"]), all_fields - inactive - {"name", "connection_type"})
+                self.assertIn("do not reprogram", details["description"])
+                warning = details["data_description"]["allow_eeprom_save"]
+                self.assertIn("all RAM configuration", warning)
+                self.assertIn("tested firmware 17", warning)
+            tcp = flow["step"]["tcp"]["description"]
+            for required in ("R035", "Industrial Automation", "502", "RTU-over-TCP", "RealPort", "baud", "outside Home Assistant"):
+                self.assertIn(required, tcp)
         self.assertIn("cannot be changed", documents[0]["config"]["step"]["user"]["data_description"]["name"])
 
 

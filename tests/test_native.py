@@ -1,4 +1,5 @@
 """Config-entry lifecycle and migration tests using real HA registries."""
+from copy import deepcopy
 import importlib
 import os
 from pathlib import Path
@@ -43,6 +44,21 @@ class NativeEntryTests(unittest.IsolatedAsyncioTestCase):
             await self.hub.async_close()
         await self.hass.async_stop()
         self.temp.cleanup()
+
+    async def test_version_030_migration_defaults_to_serial_without_changing_options(self):
+        migrate = getattr(self.integration, "async_migrate_entry", None)
+        self.assertIsNotNone(migrate, "Stored 0.3 serial entries need an explicit minor migration")
+        assert migrate is not None
+        options = {"allow_commands": True, "allow_timing_changes": False, "timeout": 0.8}
+        self.hass.config_entries.async_update_entry(self.entry, options=options)
+        original = dict(self.entry.data)
+        self.assertTrue(await migrate(self.hass, self.entry))
+        self.assertEqual(self.entry.data, {**original, "connection_type": "serial"})
+        self.assertEqual(dict(self.entry.options), options)
+        self.assertEqual(self.entry.unique_id, "blinds_bus_1")
+        self.assertEqual(self.entry.minor_version, 2)
+        self.assertTrue(await migrate(self.hass, self.entry))
+        self.assertEqual(self.entry.data, {**original, "connection_type": "serial"})
 
     async def test_config_entry_registers_bus_and_module_devices_without_writes(self):
         from homeassistant.helpers import device_registry as dr
@@ -169,6 +185,135 @@ class NativeEntryTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(record.available for record in self.hub.records.values()))
             self.assertEqual(transport.writes, [])
             self.assertTrue(await self.hass.config_entries.async_unload(self.entry.entry_id))
+
+    async def test_same_entry_can_switch_to_tcp_without_new_entity_or_device_identity(self):
+        from homeassistant.helpers import device_registry as dr
+        from test_engine import FakeTransport
+        serial_transport = FakeTransport()
+        with patch.object(self.integration, "_async_options_updated", AsyncMock()), patch.object(self.runtime, "SerialTransport", return_value=serial_transport), patch.object(
+            self.hass.config_entries, "async_forward_entry_setups", AsyncMock()
+        ):
+            await self.integration.async_setup_entry(self.hass, self.entry)
+            self.hub = self.entry.runtime_data
+        before = {d.model: d.id for d in dr.async_entries_for_config_entry(dr.async_get(self.hass), self.entry.entry_id)}
+        with patch.object(self.hass.config_entries, "async_unload_platforms", AsyncMock(return_value=True)):
+            self.assertTrue(await self.integration.async_unload_entry(self.hass, self.entry))
+        self.assertTrue(self.hub._closed)
+        self.hass.config_entries.async_update_entry(self.entry, options={
+            "connection_type": "tcp", "host": "gateway.example", "tcp_port": 502, "timeout": 2,
+        })
+        tcp_transport = FakeTransport()
+        with patch.object(self.runtime, "SerialTransport") as serial, patch.object(
+            self.runtime, "TcpTransport", return_value=tcp_transport
+        ) as tcp, patch.object(self.hass.config_entries, "async_forward_entry_setups", AsyncMock()):
+            self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
+            self.hub = self.entry.runtime_data
+            serial.assert_not_called()
+            tcp.assert_called_once()
+        after = {d.model: d.id for d in dr.async_entries_for_config_entry(dr.async_get(self.hass), self.entry.entry_id)}
+        self.assertEqual(before, after)
+        self.assertEqual(self.hub.config["name"], "blinds_bus_1")
+        cover = importlib.import_module("custom_components.domat_mw240.cover").MW240Cover(self.hub, self.config["devices"][0])
+        self.assertEqual(cover.unique_id, "domat_mw240_blinds_bus_1_23_cover")
+        self.assertEqual(self.hass.data["domat_mw240"]["ports"], {("tcp", "gateway.example", 502): self.entry.entry_id})
+        self.assertEqual(serial_transport.writes, [])
+        self.assertEqual(tcp_transport.writes, [])
+
+    async def test_tcp_endpoint_owned_elsewhere_is_refused_before_connecting(self):
+        from homeassistant.exceptions import ConfigEntryError
+        self.hass.config_entries.async_update_entry(self.entry, options={
+            "connection_type": "tcp", "host": "Gateway.EXAMPLE.", "tcp_port": 502,
+        })
+        self.hass.data["domat_mw240"] = {
+            "ports": {("tcp", "gateway.example", 502): "other_entry"}, "modbus_ports": set(),
+        }
+        with patch.object(self.runtime, "TcpTransport") as factory:
+            with self.assertRaises(ConfigEntryError):
+                await self.integration.async_setup_entry(self.hass, self.entry)
+            factory.assert_not_called()
+
+    async def test_foreign_quoted_port_setup_preserves_config_and_legacy_import(self):
+        for mode in ("tcp", "rtuovertcp"):
+            for domat in (None, [self.config]):
+                with self.subTest(mode=mode, domat=domat):
+                    config = {"modbus": [
+                        {"name": "unrelated", "type": mode, "host": "192.0.2.9", "port": "502"},
+                    ]}
+                    if domat is not None:
+                        config["domat_mw240"] = domat
+                    original = deepcopy(config)
+                    with patch.object(self.hass.config_entries.flow, "async_init", AsyncMock(return_value={"type": "abort"})) as start, patch.object(
+                        self.runtime, "SerialTransport"
+                    ) as serial, patch.object(self.runtime, "TcpTransport") as tcp:
+                        self.assertTrue(await self.integration.async_setup(self.hass, config))
+                        await self.hass.async_block_till_done()
+                        if domat is None:
+                            start.assert_not_awaited()
+                        else:
+                            start.assert_awaited_once_with("domat_mw240", context={"source": "import"}, data=self.config)
+                        serial.assert_not_called()
+                        tcp.assert_not_called()
+                    self.assertEqual(config, original)
+                    self.assertEqual(self.hass.data["domat_mw240"]["modbus_ports"], {("tcp", "192.0.2.9", 502)})
+
+    async def test_foreign_quoted_port_setup_reserves_conflicting_endpoint(self):
+        from homeassistant.exceptions import ConfigEntryError
+        self.hass.config_entries.async_update_entry(self.entry, options={
+            "connection_type": "tcp", "host": "Gateway.EXAMPLE.", "tcp_port": 502,
+        })
+        for mode in ("tcp", "rtuovertcp"):
+            with self.subTest(mode=mode):
+                config = {"modbus": [
+                    {"name": "existing", "type": mode, "host": "gateway.example", "port": "502"},
+                ]}
+                original = deepcopy(config)
+                self.assertTrue(await self.integration.async_setup(self.hass, config))
+                self.assertEqual(config, original)
+                self.assertEqual(self.hass.data["domat_mw240"]["modbus_ports"], {("tcp", "gateway.example", 502)})
+                with patch.object(self.runtime, "TcpTransport") as factory:
+                    with self.assertRaisesRegex(ConfigEntryError, "already has a Modbus owner"):
+                        await self.integration.async_setup_entry(self.hass, self.entry)
+                    factory.assert_not_called()
+
+    async def test_foreign_host_setup_uses_builtin_string_validation(self):
+        from homeassistant.helpers import config_validation as cv
+        for host in ("gateway_local", 123, 0, ""):
+            with self.subTest(host=host):
+                config = {"modbus": [{"name": "unrelated", "type": "tcp", "host": host, "port": 502}]}
+                original = deepcopy(config)
+                self.assertTrue(await self.integration.async_setup(self.hass, config))
+                self.assertEqual(config, original)
+                self.assertEqual(self.hass.data["domat_mw240"]["modbus_ports"], {("tcp", cv.string(host), 502)})
+
+    async def test_builtin_tcp_gateway_owner_is_reserved_before_native_setup(self):
+        from homeassistant.exceptions import ConfigEntryError
+        self.hass.config_entries.async_update_entry(self.entry, options={
+            "connection_type": "tcp", "host": "Gateway.EXAMPLE.", "tcp_port": 502,
+        })
+        await self.integration.async_setup(self.hass, {"modbus": [
+            {"type": "tcp", "host": "gateway.example", "port": 502},
+        ]})
+        with patch.object(self.runtime, "TcpTransport") as factory:
+            with self.assertRaises(ConfigEntryError):
+                await self.integration.async_setup_entry(self.hass, self.entry)
+            factory.assert_not_called()
+
+    async def test_tcp_setup_failure_closes_worker_and_releases_endpoint(self):
+        from test_engine import FakeTransport
+        self.hass.config_entries.async_update_entry(self.entry, options={
+            "connection_type": "tcp", "host": "gateway.example", "tcp_port": 502,
+        })
+        transport = FakeTransport()
+        with patch.object(self.runtime, "TcpTransport", return_value=transport), patch.object(
+            self.hass.config_entries, "async_forward_entry_setups", AsyncMock(side_effect=RuntimeError("Platform failed"))
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Platform failed"):
+                await self.integration.async_setup_entry(self.hass, self.entry)
+        self.hub = self.entry.runtime_data
+        self.assertTrue(self.hub._closed)
+        self.assertTrue(self.hub.bus._task.done())
+        self.assertEqual(self.hass.data["domat_mw240"]["ports"], {})
+        self.assertEqual(transport.writes, [])
 
     async def test_duplicate_serial_master_is_refused_before_opening_port(self):
         from homeassistant.exceptions import ConfigEntryError

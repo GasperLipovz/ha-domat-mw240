@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- Add standard Modbus TCP alongside Modbus RTU serial. Serial remains the default for existing configurations; TCP uses a host, TCP port (default 502), and configurable request timeout. UI forms show only the active connection's fields.
+- Allow transport changes through an existing bus's options, preserving the immutable bus name, module IDs, devices, and entities. Close the old client before opening its replacement; retain one client and serialized command queue per bus.
+- Document R035 Industrial Automation setup, single-master wiring, timeout commissioning, and serial-to-TCP migration. No RealPort/virtual COM dependency, raw RTU-over-TCP support, automatic network discovery, or downstream RTU throughput increase.
+- Preserve movement/timing/EEPROM permissions, FW17-only two-action EEPROM protection, no startup writes, and no stale-command replay. Existing native devices and source helpers are unchanged.
+- Retain Home Assistant 2026.9.4 / Python 3.14 as the baseline and runtime requirements `pymodbus>=3.13.1` and `pyserial==3.5`.
+
+TCP loopback tests use a simulated Modbus server, not a physical R035. Physical gateway commissioning and a 20-module hardware bus remain unverified; prior hardware evidence is limited to one FW17 module. See the commissioning checklist before enabling actions.
+
 ## 0.3.0
 
 - Add native Home Assistant UI configuration and options: one entry per bus, with a device for each explicitly configured module.

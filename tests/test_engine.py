@@ -205,6 +205,64 @@ class TimingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_command_that_expires_during_connect_is_not_transmitted(self):
+        import asyncio
+        entered, release = asyncio.Event(), asyncio.Event()
+        class SlowConnect(FakeTransport):
+            async def connect(self):
+                entered.set()
+                await release.wait()
+        transport = SlowConnect()
+        bus = engine.Bus(engine.Controller(transport, settle_seconds=0), command_ttl=0.02)
+        bus.start()
+        job = asyncio.create_task(bus.submit(23, "position", 0))
+        await entered.wait()
+        await asyncio.sleep(0.03)
+        release.set()
+        try:
+            with self.assertRaisesRegex(engine.DeviceError, "expired"):
+                await job
+            self.assertEqual(transport.reads, [])
+            self.assertEqual(transport.writes, [])
+        finally:
+            await bus.close()
+
+    async def test_cancel_or_shutdown_during_connect_cannot_dispatch_a_new_motor_action(self):
+        import asyncio
+        assert engine is not None
+        for cancel in (True, False):
+            with self.subTest(cancel=cancel):
+                entered, release = asyncio.Event(), asyncio.Event()
+                class PausedConnect(FakeTransport):
+                    async def connect(self):
+                        entered.set()
+                        await release.wait()
+                transport = PausedConnect()
+                bus = engine.Bus(engine.Controller(transport, settle_seconds=0))
+                bus.start()
+                job = asyncio.create_task(bus.submit(23, "position", 0))
+                await entered.wait()
+                if cancel:
+                    job.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await job
+                    release.set()
+                    try:
+                        await bus.submit(23, "poll")
+                        self.assertEqual(transport.writes, [])
+                    finally:
+                        await bus.close()
+                else:
+                    closing = asyncio.create_task(bus.close())
+                    await asyncio.sleep(0)
+                    release.set()
+                    try:
+                        with self.assertRaises(engine.DeviceError):
+                            await job
+                        self.assertEqual(transport.writes, [])
+                    finally:
+                        await closing
+
     async def test_twenty_devices_share_a_worker_and_stop_cancels_queued_movement(self):
         import asyncio
         self.assertTrue(hasattr(engine, "Bus"), "Missing serialized bus worker")

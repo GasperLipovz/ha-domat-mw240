@@ -345,6 +345,12 @@ class Bus:
                 connect = getattr(self.controller.transport, "connect", None)
                 if connect is not None:
                     await connect()
+                if self._closed:
+                    raise DeviceError("Bus stopped before command dispatch; not transmitted")
+                if future.done():
+                    continue
+                if asyncio.get_running_loop().time() > deadline:
+                    raise DeviceError("Command expired during connect; not transmitted")
                 if kind == "poll":
                     result = await self.controller.poll(unit)
                 else:

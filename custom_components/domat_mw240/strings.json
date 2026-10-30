@@ -3,10 +3,28 @@
   "config": {
     "step": {
       "user": {
-        "title": "Domat MW240 serial bus",
-        "description": "These settings configure Home Assistant only and do not reprogram module communications. They must match the existing modules. No serial connection, probing, or writes occur in this flow; startup discovers identity read-only. All write permissions are independent and disabled by default.",
+        "title": "Domat MW240 bus connection",
+        "description": "Choose the connection for this physical bus. Use Options on the existing entry when moving serial to TCP; do not add a second entry for the same bus. The stable bus name and entity identities are preserved. No hardware is contacted.",
         "data": {
-          "name": "Bus name (stable identifier)",
+          "connection_type": "Connection type",
+          "name": "Bus name (stable identifier)"
+        },
+        "data_description": {
+          "connection_type": "Choose serial for a local adapter or tcp for standard Modbus TCP. To move an existing physical bus to an R035 gateway, edit that entry in Options instead of adding a second entry.",
+          "name": "Use a unique lowercase slug, for example office_blinds. This is the legacy entity identity namespace and cannot be changed later."
+        }
+      },
+      "modules": {
+        "title": "Modules on this bus",
+        "description": "Enter one module per line, for example:\n23: Window name\n24: Another\n\nUse 1 to 247 modules with unique integer addresses from 1 to 247. Address 0 is broadcast and is never allowed. Names are editable; module addresses identify devices. This list does not scan or reprogram hardware. Identity is discovered read-only at startup.",
+        "data": {
+          "modules": "Module addresses and names"
+        }
+      },
+      "serial": {
+        "title": "Serial connection",
+        "description": "These settings configure Home Assistant only and do not reprogram module communications. No serial or network connection, probing, or writes occur in this flow; startup discovers identity read-only. Write permissions remain independent.",
+        "data": {
           "port": "Serial port",
           "baudrate": "Baud rate",
           "parity": "Parity",
@@ -19,7 +37,6 @@
           "allow_eeprom_save": "Allow permanent EEPROM save (tested firmware 17 only)"
         },
         "data_description": {
-          "name": "Use a unique lowercase slug, for example office_blinds. This is the legacy entity identity namespace and cannot be changed later.",
           "port": "Use a dedicated serial device path, preferably /dev/serial/by-id/.... Do not share it with another integration.",
           "baudrate": "Must match the existing module baud rate; this does not change the modules.",
           "parity": "Must match the existing module parity: N (none), E (even), or O (odd).",
@@ -32,32 +49,68 @@
           "allow_eeprom_save": "Disabled by default. Permanent save commits all RAM configuration, not only travel times. Limited to tested firmware 17; EEPROM has limited write endurance. Enabling permission does not itself perform a save."
         }
       },
-      "modules": {
-        "title": "Modules on this bus",
-        "description": "Enter one module per line, for example:\n23: Window name\n24: Another\n\nUse 1 to 247 modules with unique integer addresses from 1 to 247. Address 0 is broadcast and is never allowed. Names are editable; module addresses identify devices. This list does not scan or reprogram hardware. Identity is discovered read-only at startup.",
+      "tcp": {
+        "title": "Standard Modbus TCP gateway",
+        "description": "These settings configure Home Assistant only and do not reprogram module communications. No serial or network connection, probing, or writes occur in this flow; startup discovers identity read-only. Write permissions remain independent. For Domat R035, select Industrial Automation standard Modbus TCP server/gateway mode, normally port 502. Configure the RS485 baud rate, data bits, parity, and stop bits on the R035 outside Home Assistant to match the MW240 bus. RTU-over-TCP and Digi RealPort/virtual COM are not supported.",
         "data": {
-          "modules": "Module addresses and names"
+          "poll_interval": "Poll interval (seconds)",
+          "timeout": "Response timeout (seconds)",
+          "command_ttl": "Command lifetime (seconds)",
+          "allow_commands": "Allow movement commands",
+          "allow_timing_changes": "Allow applying travel-time changes to RAM",
+          "allow_eeprom_save": "Allow permanent EEPROM save (tested firmware 17 only)",
+          "host": "Gateway IP address or hostname",
+          "tcp_port": "Modbus TCP port"
+        },
+        "data_description": {
+          "poll_interval": "Read-only polling interval, from 1 to 60 seconds.",
+          "timeout": "TCP response timeout from 0.1 to 10 seconds; new TCP buses default to 2 seconds. Existing configured timeouts are preserved when switching connection.",
+          "command_ttl": "Discard expired queued commands after 1 to 15 seconds.",
+          "allow_commands": "Disabled by default. Enabling this permits physical blind movement from Home Assistant.",
+          "allow_timing_changes": "Disabled by default. This separately permits applying staged travel-time changes to module RAM; it does not save them permanently.",
+          "allow_eeprom_save": "Disabled by default. Permanent save commits all RAM configuration, not only travel times. Limited to tested firmware 17; EEPROM has limited write endurance. Enabling permission does not itself perform a save.",
+          "host": "IPv4, IPv6 (without brackets), or DNS hostname only. Do not include a URL scheme, path, or embedded port. DNS aliases are not resolved for duplicate detection; use one consistent hostname or IP per gateway.",
+          "tcp_port": "Standard Modbus TCP listener, normally 502. Integer from 1 to 65535."
         }
       }
     },
     "error": {
-      "invalid_config": "Check the settings. Use a nonempty lowercase bus slug, a serial path, supported communication settings, and values within the displayed limits.",
+      "invalid_config": "Check the active connection settings, supported transport, integer TCP port (1 to 65535), and displayed value limits. Use only an IP address or DNS hostname without a scheme, path, or embedded port.",
       "invalid_modules": "Enter 1 to 247 modules, one per line: 23: Window name. Use unique integer addresses from 1 to 247 and nonempty names. Broadcast 0, signed or fractional addresses, and duplicates are not allowed.",
       "serial_port_in_use": "This serial port (or an alias of it) is already assigned to another Domat MW240 bus. Choose a dedicated port.",
-      "already_configured": "A bus with this stable name already exists. Edit its options instead."
+      "already_configured": "A bus with this stable name already exists. Edit its options instead.",
+      "tcp_endpoint_in_use": "This Modbus TCP host and port are already assigned to another Domat MW240 bus. Edit the existing bus entry instead."
     },
     "abort": {
       "already_configured": "This bus is already configured. Existing UI settings and permissions were kept unchanged. Edit the existing entry to make changes.",
       "already_in_progress": "Configuration of this bus is already in progress. Finish or cancel the other flow first.",
       "serial_port_in_use": "This serial port (or an alias of it) is already assigned to another Domat MW240 bus. Use a dedicated port.",
-      "invalid_config": "The imported bus configuration is invalid. Check its name, serial settings, unique module addresses (1 to 247), and configured module count (1 to 247)."
+      "invalid_config": "The imported bus configuration is invalid. Check its stable name, active serial or standard TCP endpoint, settings, and unique module addresses (1 to 247).",
+      "tcp_endpoint_in_use": "This Modbus TCP host and port are already assigned to another Domat MW240 bus. Edit the existing bus entry instead."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Edit Domat MW240 bus",
-        "description": "The stable bus name cannot be changed. These settings configure Home Assistant only and do not reprogram module communications. They must match the existing modules. No serial connection, probing, or writes occur in this flow; startup discovers identity read-only. All write permissions are independent and disabled by default.",
+        "title": "Edit existing Domat MW240 connection",
+        "description": "Choose the connection for this physical bus. Use Options on the existing entry when moving serial to TCP; do not add a second entry for the same bus. The stable bus name and entity identities are preserved. No hardware is contacted.",
+        "data": {
+          "connection_type": "Connection type"
+        },
+        "data_description": {
+          "connection_type": "Choose serial for a local adapter or tcp for standard Modbus TCP. To move an existing physical bus to an R035 gateway, edit that entry in Options instead of adding a second entry."
+        }
+      },
+      "modules": {
+        "title": "Modules on this bus",
+        "description": "Enter one module per line, for example:\n23: Window name\n24: Another\n\nUse 1 to 247 modules with unique integer addresses from 1 to 247. Address 0 is broadcast and is never allowed. Names are editable; module addresses identify devices. This list does not scan or reprogram hardware. Identity is discovered read-only at startup.",
+        "data": {
+          "modules": "Module addresses and names"
+        }
+      },
+      "serial": {
+        "title": "Serial connection",
+        "description": "These settings configure Home Assistant only and do not reprogram module communications. No serial or network connection, probing, or writes occur in this flow; startup discovers identity read-only. Write permissions remain independent.",
         "data": {
           "port": "Serial port",
           "baudrate": "Baud rate",
@@ -83,25 +136,44 @@
           "allow_eeprom_save": "Disabled by default. Permanent save commits all RAM configuration, not only travel times. Limited to tested firmware 17; EEPROM has limited write endurance. Enabling permission does not itself perform a save."
         }
       },
-      "modules": {
-        "title": "Modules on this bus",
-        "description": "Enter one module per line, for example:\n23: Window name\n24: Another\n\nUse 1 to 247 modules with unique integer addresses from 1 to 247. Address 0 is broadcast and is never allowed. Names are editable; module addresses identify devices. This list does not scan or reprogram hardware. Identity is discovered read-only at startup.",
+      "tcp": {
+        "title": "Standard Modbus TCP gateway",
+        "description": "These settings configure Home Assistant only and do not reprogram module communications. No serial or network connection, probing, or writes occur in this flow; startup discovers identity read-only. Write permissions remain independent. For Domat R035, select Industrial Automation standard Modbus TCP server/gateway mode, normally port 502. Configure the RS485 baud rate, data bits, parity, and stop bits on the R035 outside Home Assistant to match the MW240 bus. RTU-over-TCP and Digi RealPort/virtual COM are not supported.",
         "data": {
-          "modules": "Module addresses and names"
+          "poll_interval": "Poll interval (seconds)",
+          "timeout": "Response timeout (seconds)",
+          "command_ttl": "Command lifetime (seconds)",
+          "allow_commands": "Allow movement commands",
+          "allow_timing_changes": "Allow applying travel-time changes to RAM",
+          "allow_eeprom_save": "Allow permanent EEPROM save (tested firmware 17 only)",
+          "host": "Gateway IP address or hostname",
+          "tcp_port": "Modbus TCP port"
+        },
+        "data_description": {
+          "poll_interval": "Read-only polling interval, from 1 to 60 seconds.",
+          "timeout": "TCP response timeout from 0.1 to 10 seconds; new TCP buses default to 2 seconds. Existing configured timeouts are preserved when switching connection.",
+          "command_ttl": "Discard expired queued commands after 1 to 15 seconds.",
+          "allow_commands": "Disabled by default. Enabling this permits physical blind movement from Home Assistant.",
+          "allow_timing_changes": "Disabled by default. This separately permits applying staged travel-time changes to module RAM; it does not save them permanently.",
+          "allow_eeprom_save": "Disabled by default. Permanent save commits all RAM configuration, not only travel times. Limited to tested firmware 17; EEPROM has limited write endurance. Enabling permission does not itself perform a save.",
+          "host": "IPv4, IPv6 (without brackets), or DNS hostname only. Do not include a URL scheme, path, or embedded port. DNS aliases are not resolved for duplicate detection; use one consistent hostname or IP per gateway.",
+          "tcp_port": "Standard Modbus TCP listener, normally 502. Integer from 1 to 65535."
         }
       }
     },
     "error": {
-      "invalid_config": "Check the settings. Use a nonempty lowercase bus slug, a serial path, supported communication settings, and values within the displayed limits.",
+      "invalid_config": "Check the active connection settings, supported transport, integer TCP port (1 to 65535), and displayed value limits. Use only an IP address or DNS hostname without a scheme, path, or embedded port.",
       "invalid_modules": "Enter 1 to 247 modules, one per line: 23: Window name. Use unique integer addresses from 1 to 247 and nonempty names. Broadcast 0, signed or fractional addresses, and duplicates are not allowed.",
       "serial_port_in_use": "This serial port (or an alias of it) is already assigned to another Domat MW240 bus. Choose a dedicated port.",
-      "already_configured": "A bus with this stable name already exists. Edit its options instead."
+      "already_configured": "A bus with this stable name already exists. Edit its options instead.",
+      "tcp_endpoint_in_use": "This Modbus TCP host and port are already assigned to another Domat MW240 bus. Edit the existing bus entry instead."
     },
     "abort": {
       "already_configured": "This bus is already configured. Existing UI settings and permissions were kept unchanged. Edit the existing entry to make changes.",
       "already_in_progress": "Configuration of this bus is already in progress. Finish or cancel the other flow first.",
       "serial_port_in_use": "This serial port (or an alias of it) is already assigned to another Domat MW240 bus. Use a dedicated port.",
-      "invalid_config": "The imported bus configuration is invalid. Check its name, serial settings, unique module addresses (1 to 247), and configured module count (1 to 247)."
+      "invalid_config": "The imported bus configuration is invalid. Check its stable name, active serial or standard TCP endpoint, settings, and unique module addresses (1 to 247).",
+      "tcp_endpoint_in_use": "This Modbus TCP host and port are already assigned to another Domat MW240 bus. Edit the existing bus entry instead."
     }
   }
 }

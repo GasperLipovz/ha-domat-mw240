@@ -1,9 +1,7 @@
 """Native Domat MW240-B bus entries with read-only legacy YAML import."""
 from __future__ import annotations
 
-import os
-
-from .config_schema import BUS_SCHEMA, CONFIG_SCHEMA, DOMAIN
+from .config_schema import BUS_SCHEMA, CONFIG_SCHEMA, DOMAIN, connection_key, modbus_connection_key
 
 
 async def async_setup(hass, config):
@@ -11,15 +9,25 @@ async def async_setup(hass, config):
     from homeassistant.config_entries import SOURCE_IMPORT
 
     state = hass.data.setdefault(DOMAIN, {"ports": {}, "modbus_ports": set()})
-    modbus_ports = [hub["port"] for hub in config.get("modbus", [])
-                    if isinstance(hub, dict) and hub.get("type") == "serial" and hub.get("port")]
-    state["modbus_ports"] = set(await hass.async_add_executor_job(
-        lambda: [os.path.realpath(port) for port in modbus_ports]
-    ))
+    state["modbus_ports"] = await hass.async_add_executor_job(
+        lambda: {endpoint for hub in config.get("modbus", [])
+                 if (endpoint := modbus_connection_key(hub, True)) is not None}
+    )
     for bus_config in config.get(DOMAIN, []):
         hass.async_create_task(hass.config_entries.flow.async_init(
             DOMAIN, context={"source": SOURCE_IMPORT}, data=bus_config
         ))
+    return True
+
+
+async def async_migrate_entry(hass, entry):
+    """Version 0.3 entries retain serial transport and every existing option."""
+    if entry.version != 1:
+        return False
+    if entry.minor_version < 2:
+        hass.config_entries.async_update_entry(
+            entry, data={"connection_type": "serial", **entry.data}, minor_version=2,
+        )
     return True
 
 
@@ -31,10 +39,10 @@ async def async_setup_entry(hass, entry):
     from .runtime import Hub
 
     bus_config = BUS_SCHEMA({**entry.data, **entry.options})
-    port = await hass.async_add_executor_job(os.path.realpath, bus_config["port"])
+    port = await hass.async_add_executor_job(connection_key, bus_config, True)
     state = hass.data.setdefault(DOMAIN, {"ports": {}, "modbus_ports": set()})
     if port in state["modbus_ports"] or state["ports"].get(port, entry.entry_id) != entry.entry_id:
-        raise ConfigEntryError("Serial port already has a Modbus master; duplicate bus refused")
+        raise ConfigEntryError("Connection endpoint already has a Modbus owner; duplicate bus refused")
     state["ports"][port] = entry.entry_id
     hub = None
     try:

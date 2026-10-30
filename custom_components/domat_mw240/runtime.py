@@ -8,28 +8,25 @@ import time
 
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from pymodbus.client import AsyncModbusSerialClient
+from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient
 
 from .engine import Bus, Controller, DeviceError, Snapshot
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class SerialTransport:
-    def __init__(self, config):
-        self.client = AsyncModbusSerialClient(
-            config["port"], baudrate=config["baudrate"], bytesize=8,
-            parity=config["parity"], stopbits=config["stopbits"],
-            timeout=config["timeout"], retries=0, reconnect_delay=0,
-        )
+class _ModbusTransport:
+    """No implicit reconnect/replay inside a command sequence, on either medium."""
+    label = "Modbus"
+    client: AsyncModbusSerialClient | AsyncModbusTcpClient
 
     async def connect(self):
         if not self.client.connected and not await self.client.connect():
-            raise DeviceError("Cannot open serial adapter")
+            raise DeviceError(f"Cannot connect to {self.label} endpoint")
 
     async def read(self, unit, address, count):
         if not self.client.connected:
-            raise DeviceError("Serial disconnected; sequence will not reconnect/replay")
+            raise DeviceError(f"{self.label} disconnected; sequence will not reconnect/replay")
         response = await self.client.read_holding_registers(address, count=count, device_id=unit)
         if response.isError() or len(response.registers) != count:
             raise DeviceError(f"FC03 failed for unit {unit}: {response}")
@@ -37,13 +34,65 @@ class SerialTransport:
 
     async def write(self, unit, address, values):
         if not self.client.connected:
-            raise DeviceError("Serial disconnected; write not replayed")
+            raise DeviceError(f"{self.label} disconnected; write not replayed")
         response = await self.client.write_registers(address, values, device_id=unit)
         if response.isError() or response.address != address or response.count != len(values):
             raise DeviceError(f"FC16 failed for unit {unit}: {response}")
 
     def close(self):
         self.client.close()
+
+
+class SerialTransport(_ModbusTransport):
+    label = "Serial"
+
+    def __init__(self, config):
+        self.client = AsyncModbusSerialClient(
+            config["port"], baudrate=config["baudrate"], bytesize=8,
+            parity=config["parity"], stopbits=config["stopbits"],
+            timeout=config["timeout"], retries=0, reconnect_delay=0,
+        )
+
+
+class TcpTransport(_ModbusTransport):
+    """Standard Modbus TCP/MBAP, e.g. R035 in Industrial Automation mode."""
+    label = "TCP gateway"
+
+    def __init__(self, config):
+        self.client = AsyncModbusTcpClient(
+            config["host"], port=config.get("tcp_port", 502),
+            timeout=config["timeout"], retries=0,
+            reconnect_delay=0, reconnect_delay_max=0,
+        )
+        self._connect_failures = 0
+        self._next_connect = 0.0
+
+    async def connect(self):
+        """One bounded attempt per retry window, not twenty gateway timeouts."""
+        if self.client.connected:
+            self._connect_failures = 0
+            self._next_connect = 0.0
+            return
+        if time.monotonic() < self._next_connect:
+            raise DeviceError("TCP gateway reconnect backoff; command not transmitted")
+        try:
+            await super().connect()
+        except Exception:
+            self._connect_failures = min(self._connect_failures + 1, 5)
+            self._next_connect = time.monotonic() + min(30, 2 ** self._connect_failures)
+            raise
+        self._connect_failures = 0
+        self._next_connect = 0.0
+
+
+def create_transport(config):
+    """Old entries lacking connection_type remain serial, without migration writes."""
+    connection_type = config.get("connection_type", "serial")
+    if connection_type == "serial":
+        return SerialTransport(config)
+    if connection_type == "tcp":
+        return TcpTransport(config)
+    raise DeviceError(f"Unsupported connection type: {connection_type}")
 
 
 @dataclass(frozen=True)
@@ -60,7 +109,7 @@ class Hub(DataUpdateCoordinator):
                          name=f"domat_mw240_{config['name']}",
                          update_interval=timedelta(seconds=config["poll_interval"]))
         self.config = config
-        self.transport = transport if transport is not None else SerialTransport(config)
+        self.transport = transport if transport is not None else create_transport(config)
         self.bus = Bus(Controller(self.transport), command_ttl=config["command_ttl"])
         self.records = {device["id"]: Record() for device in config["devices"]}
         self.pending_timings = {}
